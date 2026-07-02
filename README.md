@@ -13,8 +13,10 @@ It's a fake real-time analytics dashboard:
 - a **5,000-row scrollable table**, each row with its own custom-painted sparkline,
 - everything animating off one 60fps `Ticker`,
 - a **frame-time overlay** (top-right) reading *real* engine frame timings via
-  `SchedulerBinding.addTimingsCallback` — green bars = under the 16.7ms/60fps budget,
-  red = dropped frames.
+  `SchedulerBinding.addTimingsCallback`, split into **build** (UI/Dart thread — what
+  dart2wasm speeds up) and **raster** (raster thread — what multithreaded Skwasm
+  offloads). Stacked bars, amber = build, teal = raster, white line = 16.7ms/60fps
+  budget. The split lets you tell the JS-vs-Wasm story with the right cause.
 
 A **Load 1×–8×** slider multiplies the per-frame work so you can dial the jank up
 live if the room's projector is fast.
@@ -91,10 +93,14 @@ If it's `false`, you're serving without the headers and Skwasm falls back to
 ### Suggested capture beats (match slides 26–31)
 
 1. **Segment A — JS build.** Badge shows `JS · CANVASKIT`. Set Load to ~4×. Scroll
-   the 5k table fast while the chart + heatmap animate. Point at the overlay: avg
-   ms climbing, red bars, `N janky` rising.
-2. **Segment B — Wasm build.** Same Load, same scroll. Overlay flatter, greener,
-   lower avg ms, fewer janky frames. Same code, one flag.
+   the 5k table fast while the chart + heatmap animate. Point at the overlay: total
+   ms climbing over 16.7, bars punching past the budget line, `N janky` rising.
+2. **Segment B — Wasm build.** Same Load, same scroll. Overlay flatter, lower total
+   ms, fewer janky frames. Same code, one flag. **Watch the build vs raster split
+   and note which one drops** — that's the true cause of the win, and it picks your
+   narration branch in the script (DEMO BEAT 2). If neither is visibly worse in JS,
+   raise the Load slider (or `instrumentCount`) until the difference is clear on
+   your recording machine — the whole demo depends on a visible gap.
 3. **Segment C (optional) — Network tab.** Reload with DevTools open; show
    `main.dart.wasm` downloading, and the `build/web` listing proving both the
    `.wasm` and the `.js` fallback shipped.
