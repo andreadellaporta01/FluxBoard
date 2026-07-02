@@ -1,5 +1,7 @@
 # FluxBoard — the FlutterCon demo app
 
+> Render-bound Flutter Web dashboard demo comparing the default JavaScript build vs `--wasm` (Skwasm) — from the talk *"The JavaScript Exit: Flutter Web Beyond JavaScript."*
+
 A deliberately **render- and CPU-bound** Flutter Web dashboard, built to show the
 difference between the default JavaScript build and the `--wasm` build in the talk
 *"The JavaScript Exit: Flutter Web Beyond JavaScript."*
