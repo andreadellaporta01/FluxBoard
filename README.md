@@ -1,10 +1,11 @@
 # FluxBoard — the FlutterCon demo app
 
-> Render-bound Flutter Web dashboard demo comparing the default JavaScript build vs `--wasm` (Skwasm) — from the talk *"The JavaScript Exit: Flutter Web Beyond JavaScript."*
+> Compute-heavy Flutter Web dashboard demo comparing the default JavaScript build vs `--wasm` — from the talk *"The JavaScript Exit: Flutter Web Beyond JavaScript."*
 
-A deliberately **render- and CPU-bound** Flutter Web dashboard, built to show the
-difference between the default JavaScript build and the `--wasm` build in the talk
-*"The JavaScript Exit: Flutter Web Beyond JavaScript."*
+A deliberately **compute-heavy** Flutter Web dashboard, built to show the difference
+between the default JavaScript build and the `--wasm` build in the talk
+*"The JavaScript Exit: Flutter Web Beyond JavaScript."* The heavy work is Dart on the
+main thread (allocation/collection churn) — the workload where dart2wasm beats dart2js.
 
 It's a fake real-time analytics dashboard:
 
@@ -12,14 +13,15 @@ It's a fake real-time analytics dashboard:
 - a **heatmap** of 48×22 = 1,056 cells recomputed with trig every frame,
 - a **5,000-row scrollable table**, each row with its own custom-painted sparkline,
 - everything animating off one 60fps `Ticker`,
-- a **frame-time overlay** (top-right) reading *real* engine frame timings via
-  `SchedulerBinding.addTimingsCallback`, split into **build** (UI/Dart thread — what
-  dart2wasm speeds up) and **raster** (raster thread — what multithreaded Skwasm
-  offloads). Stacked bars, amber = build, teal = raster, white line = 16.7ms/60fps
-  budget. The split lets you tell the JS-vs-Wasm story with the right cause.
+- a **frame overlay** (top-right) reading *real* engine timings via
+  `SchedulerBinding.addTimingsCallback`. Hero = **measured FPS** (from frame cadence),
+  with a **build** (UI/Dart thread — what dart2wasm speeds up) vs **raster** split as
+  diagnostic, and a frame-interval bar graph (green = smooth, red = dropped). On the
+  web the win shows up as **build dropping and FPS holding** — not as raster, which
+  stays ~0.
 
-A **Load 1×–8×** slider multiplies the per-frame work so you can dial the jank up
-live if the room's projector is fast.
+A **Load 1×–40×** slider multiplies the per-frame Dart work (heatmap + 5k instruments)
+so you can dial the jank up until the JS build drops below 60fps even on a fast machine.
 
 > **Zero third-party dependencies** — pure Flutter. That's intentional: it means the
 > whole app is Wasm-compatible with nothing to migrate, and `flutter build web` even
@@ -92,23 +94,23 @@ If it's `false`, you're serving without the headers and Skwasm falls back to
 
 ### Suggested capture beats (match slides 26–31)
 
-1. **Segment A — JS build.** Badge shows `JS · CANVASKIT`. Set Load to ~4×. Scroll
-   the 5k table fast while the chart + heatmap animate. Point at the overlay: total
-   ms climbing over 16.7, bars punching past the budget line, `N janky` rising.
-2. **Segment B — Wasm build.** Same Load, same scroll. Overlay flatter, lower total
-   ms, fewer janky frames. Same code, one flag. **Watch the build vs raster split
-   and note which one drops** — that's the true cause of the win, and it picks your
-   narration branch in the script (DEMO BEAT 2). If neither is visibly worse in JS,
-   raise the Load slider (or `instrumentCount`) until the difference is clear on
-   your recording machine — the whole demo depends on a visible gap.
+1. **Segment A — JS build.** Badge `JS · CANVASKIT`. Load **40×**, scroll the 5k table
+   while charts animate. Overlay: **~34fps · build ~26ms · ~89 dropped**, red bars.
+   Build is the bottleneck; raster ~0 — it's Dart choking the main thread, not drawing.
+2. **Segment B — Wasm build.** Same Load, same scroll (avoid clicking the controls —
+   those are one-off `setState` spikes, not a perf signal). Overlay: **~60fps · build
+   ~16.5ms · 0 dropped**, green. Same Dart, ~**1.6× faster** compiled to Wasm — enough
+   to cross the 60fps line. The story is **execution speed** (build drops), NOT
+   multithreading (raster is ~0 on web).
 3. **Segment C (optional) — Network tab.** Reload with DevTools open; show
    `main.dart.wasm` downloading, and the `build/web` listing proving both the
    `.wasm` and the `.js` fallback shipped.
 
 Tips: record at the projector's resolution; the overlay is legible from the back
 row at 1080p+. Grab stills of each beat for the slide-deck fallback (slides 27–30).
-Numbers vary by machine — capture on the same laptop you'll present from, and don't
-promise a specific multiple on stage beyond the official Wonderous 2×/3× figure.
+Numbers vary by machine — capture on the same laptop you'll present from. Cite your
+own measured **~1.6×** (build 26.6→16.5ms) plus the official Wonderous 2×/3×; don't
+inflate beyond what the overlay shows.
 
 ---
 
@@ -128,9 +130,9 @@ firebase deploy --only hosting
 automatically by `flutter build`, so the COOP/COEP headers ship with the deploy.
 Publish directory: `build/web`.
 
-**GitHub Pages:** can't set custom headers → no multithreaded Wasm there
-(single-threaded Skwasm still works). Fine as a fallback, not for the "less jank"
-segment.
+**GitHub Pages:** can't set custom headers → no multithreaded Wasm (single-threaded
+Skwasm still works). Fine for *this* demo — its win is execution speed, which doesn't
+need multithreading; only heavy multithreaded-rendering apps would miss it.
 
 > Live-URL caveat for the talk: `Cross-Origin-Opener-Policy: same-origin` breaks
 > OAuth popups (`signInWithPopup`). FluxBoard has no auth, so it's a non-issue here —
@@ -140,7 +142,7 @@ segment.
 
 ## Knobs
 
-- **Load slider (1×–8×):** multiplies per-frame heatmap + 5k-instrument work.
+- **Load slider (1×–40×):** multiplies per-frame heatmap + 5k-instrument Dart work (build/CPU).
 - `MarketData(loadMultiplier: N)` in `lib/ui/dashboard.dart` sets the startup default.
 - `instrumentCount`, `heatCols/heatRows`, `candleCount` in `lib/data/market_data.dart`.
 
@@ -148,10 +150,10 @@ segment.
 
 ```
 lib/main.dart              MaterialApp entry
-lib/data/market_data.dart  in-place mutable state; heavy per-frame tick()
+lib/data/market_data.dart  in-place mutable state; allocation-heavy per-frame tick()
 lib/ui/dashboard.dart      layout + 60fps Ticker + Load control + renderer badge
-lib/ui/painters.dart       candlestick / heatmap / sparkline CustomPainters
-lib/ui/frame_stats.dart    real frame-timing collector + on-screen overlay
+lib/ui/painters.dart       candlestick / heatmap / sparkline / ambient glow CustomPainters
+lib/ui/frame_stats.dart    measured-FPS overlay + build/raster frame-timing collector
 web/_headers               COOP/COEP for Netlify/Cloudflare (auto-copied into build)
 firebase.json              COOP/COEP for Firebase Hosting
 serve.py                   local static server that sets COOP/COEP
