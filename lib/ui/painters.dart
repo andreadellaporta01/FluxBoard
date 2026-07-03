@@ -7,6 +7,33 @@ const _down = Color(0xFFFF5C7A);
 const _grid = Color(0x1AFFFFFF);
 const _ma = Color(0xFFFFC24B);
 
+/// Fixed ambient glow — purely decorative. The load knob drives CPU (tick),
+/// not this layer, because on Flutter Web blur rasterization is GPU-cheap and
+/// doesn't register as measurable raster cost.
+class GlowPainter extends CustomPainter {
+  GlowPainter(this.data, Listenable repaint) : super(repaint: repaint);
+  final MarketData data;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    const n = 40;
+    final t = data.animPhase;
+    for (var i = 0; i < n; i++) {
+      final a = i * 0.7 + t;
+      final x = (0.5 + 0.46 * math.sin(a * 1.13)) * size.width;
+      final y = (0.5 + 0.46 * math.cos(a * 0.91)) * size.height;
+      final r = 44.0 + 22.0 * math.sin(a * 2.1);
+      final paint = Paint()
+        ..color = (i.isEven ? _up : _ma).withValues(alpha: 0.06)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 16);
+      canvas.drawCircle(Offset(x, y), r, paint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(GlowPainter old) => true;
+}
+
 class CandlestickPainter extends CustomPainter {
   CandlestickPainter(this.data, Listenable repaint) : super(repaint: repaint);
   final MarketData data;

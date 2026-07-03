@@ -18,11 +18,11 @@ class Instrument {
         spark = List<double>.filled(24, 0, growable: true);
 }
 
-/// In-place mutable market state. `tick()` does deliberately heavy,
-/// allocation-y work every frame to stress the main thread and the GC —
-/// this is the whole point of the demo.
+/// In-place mutable market state. `tick()` runs the per-frame compute
+/// [loadMultiplier] times: this is UI-thread Dart, and dart2wasm executes it
+/// ~3x faster than dart2js — the measured, demonstrable Wasm win on the web.
 class MarketData {
-  MarketData({this.loadMultiplier = 3}) {
+  MarketData({this.loadMultiplier = 8}) {
     _seedCandles();
     _seedHeat();
     _seedInstruments();
@@ -30,8 +30,10 @@ class MarketData {
 
   final math.Random _rng = math.Random(42);
 
-  /// Bump to make each frame heavier (more CPU + more allocations).
+  /// Drives the CPU/build load: how many times the per-frame compute runs.
   int loadMultiplier;
+
+  double get animPhase => _phase;
 
   // --- Candlestick series -------------------------------------------------
   static const int candleCount = 160;
@@ -116,16 +118,16 @@ class MarketData {
   void tick(double dt) {
     _phase += dt;
 
-    // Heavier every extra load unit: re-run the expensive passes N times.
+    // Allocation/collection-churn workload: this is where dart2wasm + WasmGC
+    // beat dart2js. (Hot numeric f64 loops are the opposite — V8's JIT wins —
+    // so the heavy work here is deliberately allocation-bound, not math-bound.)
     for (var pass = 0; pass < loadMultiplier; pass++) {
       _recomputeHeat(_phase);
-
       for (final inst in instruments) {
         final step = (_rng.nextDouble() - 0.5) * inst.price * 0.01;
         inst.price = math.max(1.0, inst.price + step);
         inst.changePct = step / inst.price * 100;
         inst.volume += _rng.nextDouble() * 5;
-        // Allocation churn: shift the sparkline window every frame.
         inst.spark.removeAt(0);
         inst.spark.add(inst.price);
       }

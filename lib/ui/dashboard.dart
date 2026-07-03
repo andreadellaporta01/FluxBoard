@@ -13,7 +13,7 @@ class Dashboard extends StatefulWidget {
 
 class _DashboardState extends State<Dashboard>
     with SingleTickerProviderStateMixin {
-  final MarketData _data = MarketData(loadMultiplier: 3);
+  final MarketData _data = MarketData(loadMultiplier: 6);
   final FrameStats _stats = FrameStats();
   final ValueNotifier<int> _tick = ValueNotifier<int>(0);
   late final Ticker _ticker;
@@ -65,6 +65,11 @@ class _DashboardState extends State<Dashboard>
                   ),
                 ),
               ],
+            ),
+            Positioned.fill(
+              child: IgnorePointer(
+                child: CustomPaint(painter: GlowPainter(_data, _tick)),
+              ),
             ),
             Positioned(
               top: 16,
@@ -127,8 +132,8 @@ class _DashboardState extends State<Dashboard>
           child: Slider(
             value: _data.loadMultiplier.toDouble(),
             min: 1,
-            max: 8,
-            divisions: 7,
+            max: 40,
+            divisions: 39,
             label: '${_data.loadMultiplier}x',
             activeColor: const Color(0xFF1CE8B5),
             onChanged: (v) => setState(() => _data.loadMultiplier = v.round()),

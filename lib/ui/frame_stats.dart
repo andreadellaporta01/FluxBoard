@@ -1,4 +1,5 @@
 import 'dart:collection';
+import 'dart:ui' show FramePhase;
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 
@@ -8,12 +9,13 @@ const Color kBuildColor = Color(0xFFFFC24B);
 /// raster = raster thread (what multithreaded Skwasm offloads off the main thread).
 const Color kRasterColor = Color(0xFF1CE8B5);
 
-typedef FrameSample = ({double build, double raster});
+typedef FrameSample = ({double build, double raster, int tsMicros});
 
-/// Collects real frame timings from the engine, split into build (UI thread)
-/// and raster (raster thread), and exposes a rolling window. The split is the
-/// whole point: it shows on stage which cost dominates, so the JS-vs-Wasm
-/// story is told with the right cause.
+/// Collects real frame timings. The HERO metric is measured FPS derived from
+/// actual frame cadence (interval between vsyncs) — honest for both the
+/// single-threaded CanvasKit path and multithreaded Skwasm, where build and
+/// raster run in parallel and a build+raster sum would be misleading.
+/// build/raster durations are kept as the diagnostic that explains the cause.
 class FrameStats extends ChangeNotifier {
   FrameStats({this.window = 90}) {
     SchedulerBinding.instance.addTimingsCallback(_onTimings);
@@ -22,8 +24,6 @@ class FrameStats extends ChangeNotifier {
   final int window;
   final Queue<FrameSample> _frames = Queue<FrameSample>();
 
-  static const double budgetMs = 1000.0 / 60.0; // 16.67ms = one 60fps frame
-
   List<FrameSample> get samples => _frames.toList(growable: false);
 
   double _avg(double Function(FrameSample) sel) =>
@@ -31,22 +31,45 @@ class FrameStats extends ChangeNotifier {
 
   double get avgBuild => _avg((f) => f.build);
   double get avgRaster => _avg((f) => f.raster);
-  double get avgTotalMs => avgBuild + avgRaster;
 
-  double get maxMs => _frames.isEmpty
-      ? 0
-      : _frames.map((f) => f.build + f.raster).reduce((a, b) => a > b ? a : b);
+  /// Time between consecutive frames, in ms — the true cadence.
+  List<double> get intervalsMs {
+    final f = _frames.toList();
+    final out = <double>[];
+    for (var i = 1; i < f.length; i++) {
+      final d = (f[i].tsMicros - f[i - 1].tsMicros) / 1000.0;
+      if (d > 0 && d < 1000) out.add(d);
+    }
+    return out;
+  }
 
-  double get fps => avgTotalMs <= 0 ? 0 : (1000.0 / avgTotalMs).clamp(0, 60);
+  double get _avgIntervalMs {
+    final iv = intervalsMs;
+    if (iv.isEmpty) return 0;
+    return iv.reduce((a, b) => a + b) / iv.length;
+  }
 
+  /// Measured refresh period (fastest observed interval), clamped to a sane
+  /// range so it self-calibrates to 60Hz / 120Hz displays.
+  double get refreshMs {
+    final iv = intervalsMs;
+    if (iv.isEmpty) return 1000 / 60;
+    return iv.reduce((a, b) => a < b ? a : b).clamp(6.0, 1000 / 60);
+  }
+
+  double get fps => _avgIntervalMs <= 0 ? 0 : 1000.0 / _avgIntervalMs;
+  double get targetFps => 1000.0 / refreshMs;
+
+  /// Dropped frames: intervals notably longer than one refresh period.
   int get jankCount =>
-      _frames.where((f) => f.build + f.raster > budgetMs).length;
+      intervalsMs.where((d) => d > refreshMs * 1.5).length;
 
   void _onTimings(List<FrameTiming> timings) {
     for (final t in timings) {
       _frames.add((
         build: t.buildDuration.inMicroseconds / 1000.0,
         raster: t.rasterDuration.inMicroseconds / 1000.0,
+        tsMicros: t.timestampInMicroseconds(FramePhase.vsyncStart),
       ));
       while (_frames.length > window) {
         _frames.removeFirst();
@@ -74,17 +97,20 @@ class FrameOverlay extends StatelessWidget {
     return AnimatedBuilder(
       animation: stats,
       builder: (context, _) {
-        final total = stats.avgTotalMs;
-        final over = total > FrameStats.budgetMs;
-        final totalColor =
-            over ? const Color(0xFFFF5252) : const Color(0xFF1CE8B5);
+        final fps = stats.fps;
+        final ratio = stats.targetFps <= 0 ? 1.0 : fps / stats.targetFps;
+        final color = ratio >= 0.9
+            ? const Color(0xFF1CE8B5)
+            : ratio >= 0.6
+                ? const Color(0xFFFFC24B)
+                : const Color(0xFFFF5252);
         return Container(
           width: 320,
           padding: const EdgeInsets.fromLTRB(14, 12, 14, 10),
           decoration: BoxDecoration(
             color: const Color(0xF20E1420),
             borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: totalColor.withValues(alpha: 0.5)),
+            border: Border.all(color: color.withValues(alpha: 0.5)),
           ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -93,15 +119,21 @@ class FrameOverlay extends StatelessWidget {
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  Text(rendererLabel,
-                      style: const TextStyle(
-                          color: Colors.white70,
-                          fontSize: 12,
-                          fontFamily: 'monospace',
-                          letterSpacing: 1)),
-                  Text('${stats.jankCount} janky',
+                  Flexible(
+                    child: Text(rendererLabel,
+                        maxLines: 1,
+                        softWrap: false,
+                        overflow: TextOverflow.clip,
+                        style: const TextStyle(
+                            color: Colors.white70,
+                            fontSize: 12,
+                            fontFamily: 'monospace',
+                            letterSpacing: 1)),
+                  ),
+                  const SizedBox(width: 8),
+                  Text('${stats.jankCount} dropped',
                       style: TextStyle(
-                          color: over ? totalColor : Colors.white38,
+                          color: stats.jankCount > 0 ? color : Colors.white38,
                           fontSize: 12,
                           fontFamily: 'monospace')),
                 ],
@@ -111,16 +143,16 @@ class FrameOverlay extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.baseline,
                 textBaseline: TextBaseline.alphabetic,
                 children: [
-                  Text(total.toStringAsFixed(1),
+                  Text(fps.toStringAsFixed(0),
                       style: TextStyle(
-                          color: totalColor,
+                          color: color,
                           fontSize: 34,
                           height: 1,
                           fontWeight: FontWeight.w700,
                           fontFamily: 'monospace')),
                   const SizedBox(width: 4),
                   const Flexible(
-                    child: Text('ms/frame',
+                    child: Text('fps',
                         maxLines: 1,
                         softWrap: false,
                         overflow: TextOverflow.clip,
@@ -129,7 +161,8 @@ class FrameOverlay extends StatelessWidget {
                   Expanded(
                     child: Align(
                       alignment: Alignment.centerRight,
-                      child: Text('${stats.fps.toStringAsFixed(0)} fps',
+                      child: Text(
+                          '${(1000 / (stats.fps <= 0 ? 1 : stats.fps)).toStringAsFixed(1)} ms',
                           maxLines: 1,
                           softWrap: false,
                           overflow: TextOverflow.clip,
@@ -142,28 +175,37 @@ class FrameOverlay extends StatelessWidget {
                 ],
               ),
               const SizedBox(height: 6),
-              Row(
-                children: [
-                  _Metric(
-                      color: kBuildColor, label: 'build', value: stats.avgBuild),
-                  const SizedBox(width: 16),
-                  _Metric(
-                      color: kRasterColor,
-                      label: 'raster',
-                      value: stats.avgRaster),
-                  const Spacer(),
-                ],
+              Align(
+                alignment: Alignment.centerLeft,
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      _Metric(
+                          color: kBuildColor,
+                          label: 'build',
+                          value: stats.avgBuild),
+                      const SizedBox(width: 16),
+                      _Metric(
+                          color: kRasterColor,
+                          label: 'raster',
+                          value: stats.avgRaster),
+                    ],
+                  ),
+                ),
               ),
               const SizedBox(height: 8),
               SizedBox(
                 height: 44,
                 child: CustomPaint(
                   size: const Size(double.infinity, 44),
-                  painter: _FrameGraphPainter(stats.samples),
+                  painter: _IntervalGraphPainter(
+                      stats.intervalsMs, stats.refreshMs),
                 ),
               ),
               const SizedBox(height: 2),
-              const Text('stacked build+raster · 16.7ms = 60fps',
+              const Text('bars = frame interval · flat & low = smooth',
                   style: TextStyle(color: Colors.white30, fontSize: 10)),
             ],
           ),
@@ -191,7 +233,7 @@ class _Metric extends StatelessWidget {
         Text(label,
             style: const TextStyle(color: Colors.white54, fontSize: 12)),
         const SizedBox(width: 5),
-        Text(value.toStringAsFixed(1),
+        Text('${value.toStringAsFixed(1)}ms',
             style: TextStyle(
                 color: color, fontSize: 12, fontFamily: 'monospace')),
       ],
@@ -199,14 +241,15 @@ class _Metric extends StatelessWidget {
   }
 }
 
-class _FrameGraphPainter extends CustomPainter {
-  _FrameGraphPainter(this.samples);
-  final List<FrameSample> samples;
+class _IntervalGraphPainter extends CustomPainter {
+  _IntervalGraphPainter(this.intervals, this.refreshMs);
+  final List<double> intervals;
+  final double refreshMs;
 
   @override
   void paint(Canvas canvas, Size size) {
     const maxMs = 50.0;
-    final budgetY = size.height - (FrameStats.budgetMs / maxMs) * size.height;
+    final budgetY = size.height - (refreshMs / maxMs) * size.height;
 
     canvas.drawLine(
       Offset(0, budgetY),
@@ -216,34 +259,21 @@ class _FrameGraphPainter extends CustomPainter {
         ..strokeWidth = 1,
     );
 
-    if (samples.isEmpty) return;
-    final barW = size.width / samples.length;
-    final buildPaint = Paint()..color = kBuildColor;
-    final rasterPaint = Paint()..color = kRasterColor;
-
-    for (var i = 0; i < samples.length; i++) {
-      final s = samples[i];
-      final x = i * barW;
-      final w = barW * 0.85;
-
-      final buildH = (s.build.clamp(0.0, maxMs) / maxMs) * size.height;
-      final rasterH = (s.raster.clamp(0.0, maxMs) / maxMs) * size.height;
-      final clampedRasterH =
-          (buildH + rasterH > size.height) ? size.height - buildH : rasterH;
-
-      // build sits at the bottom, raster stacks on top.
+    if (intervals.isEmpty) return;
+    final barW = size.width / intervals.length;
+    final threshold = refreshMs * 1.35;
+    for (var i = 0; i < intervals.length; i++) {
+      final v = intervals[i].clamp(0.0, maxMs);
+      final h = (v / maxMs) * size.height;
+      final dropped = intervals[i] > threshold;
       canvas.drawRect(
-        Rect.fromLTWH(x, size.height - buildH, w, buildH),
-        buildPaint,
-      );
-      canvas.drawRect(
-        Rect.fromLTWH(x, size.height - buildH - clampedRasterH, w,
-            clampedRasterH.clamp(0.0, size.height)),
-        rasterPaint,
+        Rect.fromLTWH(i * barW, size.height - h, barW * 0.85, h),
+        Paint()
+          ..color = dropped ? const Color(0xFFFF5252) : const Color(0xFF1CE8B5),
       );
     }
   }
 
   @override
-  bool shouldRepaint(_FrameGraphPainter old) => true;
+  bool shouldRepaint(_IntervalGraphPainter old) => true;
 }
